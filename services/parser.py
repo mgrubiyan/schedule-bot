@@ -10,94 +10,47 @@ HEADERS = {"User-Agent": "Mozilla/5.0"}
 async def fetch_schedule_html() -> str:
     connector = aiohttp.TCPConnector(ssl=False)
     async with aiohttp.ClientSession(connector=connector) as session:
-        try:
-            async with session.get(SCHEDULE_URL, headers=HEADERS) as response:
-                return await response.text() if response.status == 200 else ""
-        except Exception:
-            return ""
+        async with session.get(SCHEDULE_URL, headers=HEADERS) as response:
+            return await response.text() if response.status == 200 else ""
 
 
-def get_clean_text_from_tag(tag) -> str:
-    if not tag:
-        return ""
-
-    tag_copy = BeautifulSoup(str(tag), "html.parser")
-
-    for hidden in tag_copy.find_all(class_="scheme"):
-        hidden.decompose()
-
-    for trash in tag_copy.find_all(string=re.compile("ПОКАЗАТЬ НА СХЕМЕ")):
-        trash.parent.decompose()
-
-    text = tag_copy.get_text(separator=" ", strip=True)
-
-    if "|" in text:
-        text = text.split("|")[0]
-
+def clean_text(text: str) -> str:
+    text = re.sub(r'ПОКАЗАТЬ НА СХЕМЕ', '', text)
+    text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
 
-def clean_subject(subject_text: str) -> str:
-    subject_text = re.sub(r'\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2}', '', subject_text)
-    subject_text = re.sub(r'\d+\s*ауд\.?', '', subject_text)
-    subject_text = subject_text.replace("Грибоедова 30/32", "").replace("Грибоедова", "")
-    subject_text = subject_text.replace("|", "")
-    return re.sub(r'\s+', ' ', subject_text).strip()
-
-
-def parse_schedule_from_html(html_content: str) -> list[dict]:
-    if not html_content:
-        return []
-
-    soup = BeautifulSoup(html_content, "html.parser")
+def parse_schedule_from_html(html: str) -> list[dict]:
+    soup = BeautifulSoup(html, "html.parser")
     schedule = []
 
-    last_known_date = None  # 🔥 КЛЮЧЕВОЕ ИЗМЕНЕНИЕ
+    current_date = None
 
     for row in soup.find_all("tr"):
-        cols = row.find_all("td")
-        if not cols:
+        cells = [clean_text(td.get_text(" ", strip=True)) for td in row.find_all("td")]
+        if not cells:
             continue
 
-        col_texts = [get_clean_text_from_tag(c) for c in cols]
+        # 🔹 если в строке есть дата — обновляем состояние
+        if re.match(r"\d{2}\.\d{2}\.\d{4}", cells[0]):
+            current_date = cells[0][:10]
+            cells = cells[1:]  # убираем дату из обработки
 
-        current_date = None
-        time = ""
-        room = ""
-        subject = ""
-
-        # Строка с датой + парой
-        if len(col_texts) >= 4 and "." in col_texts[0]:
-            current_date = col_texts[0]
-            last_known_date = current_date
-            time = col_texts[1]
-            room = col_texts[2]
-            subject = col_texts[3]
-
-        # Строка БЕЗ даты (продолжение дня)
-        elif len(col_texts) >= 3 and ":" in col_texts[0] and last_known_date:
-            current_date = last_known_date
-            time = col_texts[0]
-            room = col_texts[1]
-            subject = col_texts[2]
-
-        else:
+        # 🔹 ищем время пары
+        time_cell = next((c for c in cells if re.search(r"\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2}", c)), None)
+        if not time_cell or not current_date:
             continue
 
-        if not time or not subject or not current_date:
-            continue
+        time = re.search(r"\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2}", time_cell).group()
 
-        room = re.sub(r'\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2}', '', room).strip()
-        subject = clean_subject(subject)
-
-        if len(current_date) > 10 and current_date[10] != ' ':
-            current_date = current_date[:10] + ' ' + current_date[10:]
+        # 🔹 собираем остальной текст как описание
+        rest_text = " ".join(cells)
+        rest_text = rest_text.replace(time, "").strip()
 
         schedule.append({
             "date": current_date,
             "time": time,
-            "subject": subject,
-            "room": room
+            "text": rest_text
         })
 
     return schedule
@@ -111,4 +64,7 @@ async def get_real_schedule() -> list[dict]:
 async def get_today_schedule() -> list[dict]:
     full = await get_real_schedule()
     today = datetime.now().strftime("%d.%m.%Y")
-    return [s for s in full if today in s["date"]]
+    return sorted(
+        [s for s in full if s["date"] == today],
+        key=lambda x: x["time"]
+    )
